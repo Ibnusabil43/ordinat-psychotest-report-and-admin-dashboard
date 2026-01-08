@@ -4,55 +4,112 @@ import { useRouter } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
 import Button from '@/components/ui/Button.vue';
 import Input from '@/components/ui/Input.vue';
-import { Search, LogOut, Clock, Users } from 'lucide-vue-next';
+import LoadingSpinner from '@/components/ui/LoadingSpinner.vue';
+import { Search, LogOut, Clock, Users, AlertCircle } from 'lucide-vue-next';
+import { searchParticipants, getParticipantByToken } from '@/services/participantService';
+import { searchInstitutions } from '@/services/institutionService';
+import type { Participant, Institution } from '@/types/models';
 
 const router = useRouter();
 const authStore = useAuthStore();
 
 const searchQuery = ref('');
-const searchResults = ref<any[]>([]);
+const searchResults = ref<Array<{
+  id: string;
+  timestamp: string;
+  name: string;
+  info: string;
+  type: 'cpmi' | 'instansi';
+  status: 'found' | 'not-found';
+}>>([]);
 const hasSearched = ref(false);
+const isSearching = ref(false);
+const errorMessage = ref<string | null>(null);
 
-const mockParticipants = [
-  { id: 1, timestamp: '07 Jan 2026, 09:15', name: 'Ahmad Fauzi', class: 'XII IPA 1', status: 'found' },
-  { id: 2, timestamp: '07 Jan 2026, 09:20', name: 'Siti Nurhaliza', class: 'XII IPA 2', status: 'found' },
-  { id: 3, timestamp: '07 Jan 2026, 09:25', name: 'Budi Santoso', class: 'XII IPS 1', status: 'found' },
-  { id: 4, timestamp: '07 Jan 2026, 09:30', name: 'Dewi Lestari', class: 'XII IPS 2', status: 'found' },
-  { id: 5, timestamp: '07 Jan 2026, 09:35', name: 'Rudi Hermawan', class: 'XII IPA 3', status: 'found' },
-];
-
-const handleSearch = () => {
+const handleSearch = async () => {
+  if (!searchQuery.value.trim()) return;
+  
   hasSearched.value = true;
-
-  if (searchQuery.value.trim()) {
-    const results = mockParticipants.filter(p => 
-      p.name.toLowerCase().includes(searchQuery.value.toLowerCase())
-    );
+  isSearching.value = true;
+  searchResults.value = [];
+  errorMessage.value = null;
+  
+  try {
+    const query = searchQuery.value.trim();
+    const results: typeof searchResults.value = [];
+    const now = new Date().toLocaleString('id-ID', { 
+      day: '2-digit', 
+      month: 'short', 
+      year: 'numeric', 
+      hour: '2-digit', 
+      minute: '2-digit' 
+    });
+    
+    // First, try searching by token directly
+    const byToken = await getParticipantByToken(query);
+    if (byToken) {
+      results.push({
+        id: byToken.id || '',
+        timestamp: now,
+        name: byToken.namaLengkap,
+        info: byToken.nikOrPaspor || 'No NIK/Passport',
+        type: 'cpmi',
+        status: 'found',
+      });
+    }
+    
+    // Search participants by name/NIK
+    const participants = await searchParticipants(query, 10);
+    participants.forEach((p: Participant) => {
+      // Avoid duplicates if already found by token
+      if (!results.find(r => r.id === p.id)) {
+        results.push({
+          id: p.id || '',
+          timestamp: now,
+          name: p.namaLengkap,
+          info: p.nikOrPaspor || 'No NIK/Passport',
+          type: 'cpmi',
+          status: 'found',
+        });
+      }
+    });
+    
+    // Also search institutions
+    const institutions = await searchInstitutions(query, 5);
+    institutions.forEach((i: Institution) => {
+      results.push({
+        id: i.id || '',
+        timestamp: now,
+        name: i.namaInstansi,
+        info: `${i.participantCount || 0} peserta`,
+        type: 'instansi',
+        status: 'found',
+      });
+    });
     
     if (results.length === 0) {
-      searchResults.value = [{
-        id: 0,
-        timestamp: new Date().toLocaleString('id-ID', { 
-          day: '2-digit', 
-          month: 'short', 
-          year: 'numeric', 
-          hour: '2-digit', 
-          minute: '2-digit' 
-        }),
-        name: searchQuery.value,
-        class: '-',
-        status: 'not-found'
-      }];
-    } else {
-      searchResults.value = results;
+      // No results found
+      results.push({
+        id: '0',
+        timestamp: now,
+        name: query,
+        info: '-',
+        type: 'cpmi',
+        status: 'not-found',
+      });
     }
-  } else {
-    searchResults.value = [];
+    
+    searchResults.value = results;
+  } catch (error: any) {
+    console.error('Search error:', error);
+    errorMessage.value = error.message || 'Terjadi kesalahan saat mencari data';
+  } finally {
+    isSearching.value = false;
   }
 };
 
-const handleLogout = () => {
-  authStore.logout();
+const handleLogout = async () => {
+  await authStore.logout();
   router.push('/admin/login');
 };
 </script>
@@ -101,23 +158,32 @@ const handleLogout = () => {
         <!-- Search Section -->
         <div class="mb-8">
           <label class="block text-gray-900 font-semibold mb-4 text-lg">
-            Search by Participant Name
+            Search by Participant Name or Token
           </label>
           <form @submit.prevent="handleSearch" class="flex gap-3">
             <Input
               v-model="searchQuery"
               type="text"
-              placeholder="Type participant name"
-              class="bg-gray-50 border-2 border-gray-300 h-14 px-5 text-base focus:border-[#2563FF] flex-1"
+              placeholder="Type participant name, NIK, or token"
+              :disabled="isSearching"
+              class="bg-gray-50 border-2 border-gray-300 h-14 px-5 text-base focus:border-[#2563FF] flex-1 disabled:opacity-50"
             />
             <Button 
               type="submit"
-              class="bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-14 px-8 font-semibold shadow-lg"
+              :disabled="isSearching || !searchQuery.trim()"
+              class="bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-14 px-8 font-semibold shadow-lg disabled:opacity-50"
             >
-              <Search class="w-5 h-5 mr-2" />
-              Search
+              <LoadingSpinner v-if="isSearching" class="w-5 h-5 mr-2" />
+              <Search v-else class="w-5 h-5 mr-2" />
+              {{ isSearching ? 'Searching...' : 'Search' }}
             </Button>
           </form>
+          
+          <!-- Error Message -->
+          <div v-if="errorMessage" class="mt-4 flex items-center gap-2 text-red-600 bg-red-50 p-3 rounded-lg border border-red-200">
+            <AlertCircle class="w-4 h-4 flex-shrink-0" />
+            <span class="text-sm">{{ errorMessage }}</span>
+          </div>
         </div>
 
         <!-- Results Section -->
@@ -140,7 +206,7 @@ const handleLogout = () => {
                         Participant Name
                       </div>
                     </th>
-                    <th class="px-6 py-4 text-left text-sm font-semibold">Class</th>
+                    <th class="px-6 py-4 text-left text-sm font-semibold">Type / Info</th>
                     <th class="px-6 py-4 text-left text-sm font-semibold">Status</th>
                   </tr>
                 </thead>
@@ -157,7 +223,13 @@ const handleLogout = () => {
                   >
                     <td class="px-6 py-4 text-sm text-gray-600">{{ result.timestamp }}</td>
                     <td class="px-6 py-4 text-sm font-medium text-gray-900">{{ result.name }}</td>
-                    <td class="px-6 py-4 text-sm text-gray-600">{{ result.class }}</td>
+                    <td class="px-6 py-4 text-sm text-gray-600">
+                      <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mr-2" 
+                            :class="result.type === 'cpmi' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'">
+                        {{ result.type === 'cpmi' ? 'CPMI' : 'Instansi' }}
+                      </span>
+                      {{ result.info }}
+                    </td>
                     <td class="px-6 py-4">
                       <span v-if="result.status === 'found'" class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700 border border-green-200">
                         ✓ Found / Registered
@@ -190,8 +262,14 @@ const handleLogout = () => {
                   </div>
                   <div class="grid grid-cols-2 gap-3">
                     <div>
-                      <div class="text-xs text-gray-600 mb-1">Class</div>
-                      <div class="text-sm text-gray-900">{{ result.class }}</div>
+                      <div class="text-xs text-gray-600 mb-1">Type / Info</div>
+                      <div class="text-sm text-gray-900">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium" 
+                              :class="result.type === 'cpmi' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'">
+                          {{ result.type === 'cpmi' ? 'CPMI' : 'Instansi' }}
+                        </span>
+                        <span class="ml-1">{{ result.info }}</span>
+                      </div>
                     </div>
                     <div>
                       <div class="text-xs text-gray-600 mb-1">Status</div>

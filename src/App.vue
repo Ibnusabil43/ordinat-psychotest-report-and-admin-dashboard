@@ -1,17 +1,29 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
+import LoadingSpinner from '@/components/ui/LoadingSpinner.vue'
 
 const authStore = useAuthStore()
+const isAppReady = ref(false)
 
-onMounted(() => {
-  // Restore authentication session on app load
-  authStore.restoreSession()
+onMounted(async () => {
+  // Initialize Firebase auth state listener
+  await authStore.initializeAuth()
+  isAppReady.value = true
 })
 </script>
 
 <template>
-  <div class="min-h-screen bg-background">
+  <!-- Loading state while initializing auth -->
+  <div v-if="!isAppReady" class="min-h-screen bg-gradient-to-br from-[#2563FF] via-[#4F46E5] to-[#7C3AED] flex items-center justify-center">
+    <div class="text-center">
+      <LoadingSpinner class="w-12 h-12 text-white mx-auto mb-4" />
+      <p class="text-white/80 text-sm">Memuat aplikasi...</p>
+    </div>
+  </div>
+
+  <!-- Main app content -->
+  <div v-else class="min-h-screen bg-background">
     <RouterView v-slot="{ Component, route }">
       <Transition 
         :name="route.meta.transition as string || 'fade'"

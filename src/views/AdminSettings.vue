@@ -1,18 +1,30 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted, computed } from 'vue';
 import { useAuthStore } from '@/stores/auth';
 import AdminSidebar from '@/components/AdminSidebar.vue';
 import Button from '@/components/ui/Button.vue';
 import Input from '@/components/ui/Input.vue';
-import { User, Lock, Bell, Save, Shield, Eye, EyeOff, Mail } from 'lucide-vue-next';
+import LoadingSpinner from '@/components/ui/LoadingSpinner.vue';
+import { User, Lock, Bell, Save, Shield, Eye, EyeOff, Mail, CheckCircle, XCircle } from 'lucide-vue-next';
+import { updateUserProfile, changePassword, updateUserSettings, getUserSettings } from '@/services/authService';
+// UserSettings type is used in authService
 
 const authStore = useAuthStore();
 
 const showPassword = ref(false);
+const isLoadingProfile = ref(false);
+const isLoadingPassword = ref(false);
+const isLoadingSettings = ref(true);
+const profileError = ref<string | null>(null);
+const profileSuccess = ref(false);
+const passwordError = ref<string | null>(null);
+const passwordSuccess = ref(false);
+
+// Profile data - initialized from auth store
 const profileData = ref({
-  namaLengkap: 'Admin Utama',
-  email: 'admin@ordinat.com',
-  phone: '+62 812 3456 7890',
+  namaLengkap: '',
+  email: '',
+  phone: '',
 });
 
 const passwordData = ref({
@@ -27,19 +39,140 @@ const notificationSettings = ref({
   registrationNotif: false,
 });
 
-const saveStatus = ref<'idle' | 'success'>('idle');
+// Computed for last login display
+const lastLoginDisplay = computed(() => {
+  // This would ideally come from Firebase Auth metadata
+  return new Date().toLocaleDateString('id-ID', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+});
 
-const handleSaveProfile = () => {
-  saveStatus.value = 'success';
-  setTimeout(() => saveStatus.value = 'idle', 2000);
+// Load user data on mount
+onMounted(async () => {
+  // Initialize profile data from auth store
+  profileData.value = {
+    namaLengkap: authStore.userName || 'Admin',
+    email: authStore.userEmail || '',
+    phone: '',
+  };
+  
+  // Load notification settings from Firestore
+  if (authStore.userId) {
+    try {
+      const settings = await getUserSettings(authStore.userId);
+      if (settings) {
+        notificationSettings.value = {
+          emailNotif: settings.emailNotifications ?? true,
+          uploadNotif: settings.uploadNotifications ?? true,
+          registrationNotif: settings.registrationNotifications ?? false,
+        };
+        profileData.value.phone = settings.phone || '';
+      }
+    } catch (error) {
+      console.error('Failed to load user settings:', error);
+    }
+  }
+  isLoadingSettings.value = false;
+});
+
+// Save profile to Firebase
+const handleSaveProfile = async () => {
+  isLoadingProfile.value = true;
+  profileError.value = null;
+  profileSuccess.value = false;
+  
+  try {
+    if (!authStore.userId) throw new Error('User not authenticated');
+    
+    // Update auth profile
+    await updateUserProfile(authStore.userId, {
+      displayName: profileData.value.namaLengkap,
+      phone: profileData.value.phone,
+    });
+    
+    // Update user settings in Firestore
+    await updateUserSettings(authStore.userId, {
+      phone: profileData.value.phone,
+      emailNotifications: notificationSettings.value.emailNotif,
+      uploadNotifications: notificationSettings.value.uploadNotif,
+      registrationNotifications: notificationSettings.value.registrationNotif,
+    });
+    
+    // Update auth store displayName
+    if (authStore.user) {
+      authStore.user.displayName = profileData.value.namaLengkap;
+    }
+    
+    profileSuccess.value = true;
+    setTimeout(() => profileSuccess.value = false, 3000);
+  } catch (error: any) {
+    console.error('Failed to save profile:', error);
+    profileError.value = error.message || 'Gagal menyimpan perubahan profil';
+  } finally {
+    isLoadingProfile.value = false;
+  }
 };
 
-const handleChangePassword = () => {
-  saveStatus.value = 'success';
-  setTimeout(() => {
-    saveStatus.value = 'idle';
+// Change password
+const handleChangePassword = async () => {
+  // Validation
+  if (!passwordData.value.currentPassword) {
+    passwordError.value = 'Password saat ini harus diisi';
+    return;
+  }
+  if (passwordData.value.newPassword.length < 6) {
+    passwordError.value = 'Password baru minimal 6 karakter';
+    return;
+  }
+  if (passwordData.value.newPassword !== passwordData.value.confirmPassword) {
+    passwordError.value = 'Konfirmasi password tidak cocok';
+    return;
+  }
+  
+  isLoadingPassword.value = true;
+  passwordError.value = null;
+  passwordSuccess.value = false;
+  
+  try {
+    await changePassword(
+      passwordData.value.currentPassword,
+      passwordData.value.newPassword
+    );
+    
+    passwordSuccess.value = true;
     passwordData.value = { currentPassword: '', newPassword: '', confirmPassword: '' };
-  }, 2000);
+    setTimeout(() => passwordSuccess.value = false, 3000);
+  } catch (error: any) {
+    console.error('Failed to change password:', error);
+    if (error.code === 'auth/wrong-password') {
+      passwordError.value = 'Password saat ini salah';
+    } else if (error.code === 'auth/weak-password') {
+      passwordError.value = 'Password baru terlalu lemah';
+    } else {
+      passwordError.value = error.message || 'Gagal mengubah password';
+    }
+  } finally {
+    isLoadingPassword.value = false;
+  }
+};
+
+// Save notification settings when toggled
+const handleNotificationChange = async () => {
+  if (!authStore.userId) return;
+  
+  try {
+    await updateUserSettings(authStore.userId, {
+      emailNotifications: notificationSettings.value.emailNotif,
+      uploadNotifications: notificationSettings.value.uploadNotif,
+      registrationNotifications: notificationSettings.value.registrationNotif,
+    });
+  } catch (error) {
+    console.error('Failed to save notification settings:', error);
+  }
 };
 </script>
 
@@ -75,12 +208,23 @@ const handleChangePassword = () => {
               <h2 class="text-base md:text-lg font-bold text-white">Informasi Profil</h2>
             </div>
             <form @submit.prevent="handleSaveProfile" class="p-4 md:p-6 space-y-4 md:space-y-6">
+              <!-- Success/Error Messages -->
+              <div v-if="profileSuccess" class="flex items-center gap-2 text-green-700 bg-green-50 p-3 rounded-lg border border-green-200">
+                <CheckCircle class="w-4 h-4 flex-shrink-0" />
+                <span class="text-sm">Profil berhasil disimpan!</span>
+              </div>
+              <div v-if="profileError" class="flex items-center gap-2 text-red-700 bg-red-50 p-3 rounded-lg border border-red-200">
+                <XCircle class="w-4 h-4 flex-shrink-0" />
+                <span class="text-sm">{{ profileError }}</span>
+              </div>
+              
               <div class="grid md:grid-cols-2 gap-4 md:gap-6">
                 <div>
                   <label class="block text-gray-700 font-medium mb-2 text-sm">Nama Lengkap</label>
                   <Input
                     v-model="profileData.namaLengkap"
-                    class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
+                    :disabled="isLoadingProfile"
+                    class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base disabled:opacity-50"
                   />
                 </div>
                 <div>
@@ -88,23 +232,28 @@ const handleChangePassword = () => {
                   <Input
                     v-model="profileData.email"
                     type="email"
-                    class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
+                    disabled
+                    class="bg-gray-100 border-2 border-gray-300 h-11 md:h-12 px-4 text-sm md:text-base cursor-not-allowed"
                   />
+                  <p class="text-xs text-gray-500 mt-1">Email tidak dapat diubah</p>
                 </div>
               </div>
               <div>
                 <label class="block text-gray-700 font-medium mb-2 text-sm">Nomor Telepon</label>
                 <Input
                   v-model="profileData.phone"
-                  class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
+                  :disabled="isLoadingProfile"
+                  class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base disabled:opacity-50"
                 />
               </div>
               <Button 
                 type="submit"
-                class="w-full md:w-auto bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-11 md:h-12 px-6 md:px-8 font-semibold min-h-[44px] md:min-h-0 text-sm md:text-base"
+                :disabled="isLoadingProfile"
+                class="w-full md:w-auto bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-11 md:h-12 px-6 md:px-8 font-semibold min-h-[44px] md:min-h-0 text-sm md:text-base disabled:opacity-50"
               >
-                <Save class="w-4 h-4 md:mr-2" />
-                <span class="ml-2 md:ml-0">Simpan Perubahan</span>
+                <LoadingSpinner v-if="isLoadingProfile" class="w-4 h-4" />
+                <Save v-else class="w-4 h-4 md:mr-2" />
+                <span class="ml-2 md:ml-0">{{ isLoadingProfile ? 'Menyimpan...' : 'Simpan Perubahan' }}</span>
               </Button>
             </form>
           </div>
@@ -116,13 +265,24 @@ const handleChangePassword = () => {
               <h2 class="text-base md:text-lg font-bold text-white">Keamanan Password</h2>
             </div>
             <form @submit.prevent="handleChangePassword" class="p-4 md:p-6 space-y-4 md:space-y-6">
+              <!-- Success/Error Messages -->
+              <div v-if="passwordSuccess" class="flex items-center gap-2 text-green-700 bg-green-50 p-3 rounded-lg border border-green-200">
+                <CheckCircle class="w-4 h-4 flex-shrink-0" />
+                <span class="text-sm">Password berhasil diubah!</span>
+              </div>
+              <div v-if="passwordError" class="flex items-center gap-2 text-red-700 bg-red-50 p-3 rounded-lg border border-red-200">
+                <XCircle class="w-4 h-4 flex-shrink-0" />
+                <span class="text-sm">{{ passwordError }}</span>
+              </div>
+              
               <div>
                 <label class="block text-gray-700 font-medium mb-2 text-sm">Password Saat Ini</label>
                 <div class="relative">
                   <Input
                     v-model="passwordData.currentPassword"
                     :type="showPassword ? 'text' : 'password'"
-                    class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 pr-12 focus:border-[#2563FF] text-sm md:text-base"
+                    :disabled="isLoadingPassword"
+                    class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 pr-12 focus:border-[#2563FF] text-sm md:text-base disabled:opacity-50"
                     placeholder="Masukkan password lama"
                   />
                   <button
@@ -142,8 +302,9 @@ const handleChangePassword = () => {
                   <Input
                     v-model="passwordData.newPassword"
                     :type="showPassword ? 'text' : 'password'"
-                    class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
-                    placeholder="Minimal 8 karakter"
+                    :disabled="isLoadingPassword"
+                    class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base disabled:opacity-50"
+                    placeholder="Minimal 6 karakter"
                   />
                 </div>
                 <div>
@@ -151,7 +312,8 @@ const handleChangePassword = () => {
                   <Input
                     v-model="passwordData.confirmPassword"
                     :type="showPassword ? 'text' : 'password'"
-                    class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
+                    :disabled="isLoadingPassword"
+                    class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base disabled:opacity-50"
                     placeholder="Ulangi password baru"
                   />
                 </div>
@@ -159,10 +321,12 @@ const handleChangePassword = () => {
 
               <Button 
                 type="submit"
-                class="w-full md:w-auto bg-purple-600 hover:bg-purple-700 text-white h-11 md:h-12 px-6 md:px-8 font-semibold min-h-[44px] md:min-h-0 text-sm md:text-base"
+                :disabled="isLoadingPassword"
+                class="w-full md:w-auto bg-purple-600 hover:bg-purple-700 text-white h-11 md:h-12 px-6 md:px-8 font-semibold min-h-[44px] md:min-h-0 text-sm md:text-base disabled:opacity-50"
               >
-                <Shield class="w-4 h-4 md:mr-2" />
-                <span class="ml-2 md:ml-0">Update Password</span>
+                <LoadingSpinner v-if="isLoadingPassword" class="w-4 h-4" />
+                <Shield v-else class="w-4 h-4 md:mr-2" />
+                <span class="ml-2 md:ml-0">{{ isLoadingPassword ? 'Memperbarui...' : 'Update Password' }}</span>
               </Button>
             </form>
           </div>
@@ -185,6 +349,7 @@ const handleChangePassword = () => {
                 <label class="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-2">
                   <input
                     v-model="notificationSettings.emailNotif"
+                    @change="handleNotificationChange"
                     type="checkbox"
                     class="sr-only peer"
                   />
@@ -203,6 +368,7 @@ const handleChangePassword = () => {
                 <label class="relative inline-flex items-center cursor-pointer">
                   <input
                     v-model="notificationSettings.uploadNotif"
+                    @change="handleNotificationChange"
                     type="checkbox"
                     class="sr-only peer"
                   />
@@ -221,6 +387,7 @@ const handleChangePassword = () => {
                 <label class="relative inline-flex items-center cursor-pointer">
                   <input
                     v-model="notificationSettings.registrationNotif"
+                    @change="handleNotificationChange"
                     type="checkbox"
                     class="sr-only peer"
                   />
@@ -240,11 +407,11 @@ const handleChangePassword = () => {
               </div>
               <div class="flex justify-between p-3 bg-gray-50 rounded-lg">
                 <span class="text-gray-600">Last Login:</span>
-                <span class="font-medium text-gray-900">7 Jan 2026, 10:30</span>
+                <span class="font-medium text-gray-900">{{ lastLoginDisplay }}</span>
               </div>
               <div class="flex justify-between p-3 bg-gray-50 rounded-lg">
                 <span class="text-gray-600">Role:</span>
-                <span class="font-medium text-gray-900">Super Admin</span>
+                <span class="font-medium text-gray-900 capitalize">{{ authStore.userRole || 'Admin' }}</span>
               </div>
               <div class="flex justify-between p-3 bg-gray-50 rounded-lg">
                 <span class="text-gray-600">Status:</span>

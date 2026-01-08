@@ -1,43 +1,163 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { Check, ChevronDown, Download, CheckCircle, XCircle, ArrowLeft } from 'lucide-vue-next';
+import { Check, ChevronDown, Download, CheckCircle, XCircle, ArrowLeft, Loader2 } from 'lucide-vue-next';
 import Button from '@/components/ui/Button.vue';
 import Input from '@/components/ui/Input.vue';
 import Select from '@/components/ui/Select.vue';
+import { getParticipantByToken } from '@/services/participantService';
+import { getInstitutionByToken } from '@/services/institutionService';
+import { getResultsByParticipant, getResultsByInstitution, downloadResult } from '@/services/resultsService';
+import { logDownload } from '@/services/activityService';
+import type { Participant, Institution, PsychotestResult, EntityType } from '@/types/models';
 
 const router = useRouter();
 
-const userType = ref<'cpmi' | 'instansi'>('cpmi');
+const userType = ref<EntityType>('cpmi');
 const formData = ref({
   nama: '',
   token: '',
   tanggalLahir: '',
   namaInstansi: ''
 });
-const formStatus = ref<'idle' | 'success' | 'error'>('idle');
+const formStatus = ref<'idle' | 'loading' | 'success' | 'error'>('idle');
+const errorMessage = ref<string | null>(null);
 const showFiles = ref(false);
+const verifiedEntity = ref<Participant | Institution | null>(null);
+const availableResults = ref<PsychotestResult[]>([]);
+const downloadingIds = ref<Set<string>>(new Set());
 
-const handleCheckData = () => {
-  if (formData.value.token && (userType.value === 'cpmi' ? formData.value.nama : formData.value.namaInstansi)) {
-    formStatus.value = 'success';
-    if (userType.value === 'instansi') {
+// Verify token and load data
+const handleCheckData = async () => {
+  const token = formData.value.token.trim();
+  const name = userType.value === 'cpmi' 
+    ? formData.value.nama.trim() 
+    : formData.value.namaInstansi.trim();
+  
+  if (!token || !name) {
+    formStatus.value = 'error';
+    errorMessage.value = 'Mohon lengkapi semua field yang diperlukan';
+    return;
+  }
+  
+  formStatus.value = 'loading';
+  errorMessage.value = null;
+  verifiedEntity.value = null;
+  availableResults.value = [];
+  showFiles.value = false;
+  
+  try {
+    if (userType.value === 'cpmi') {
+      // Verify CPMI by token
+      const participant = await getParticipantByToken(token);
+      
+      if (!participant) {
+        throw new Error('Token tidak ditemukan');
+      }
+      
+      // Verify name matches (case-insensitive)
+      if (participant.namaLengkap.toLowerCase() !== name.toLowerCase()) {
+        throw new Error('Nama tidak cocok dengan token');
+      }
+      
+      // Get results for this participant
+      const results = await getResultsByParticipant(participant.id!);
+      
+      if (results.length === 0) {
+        throw new Error('Belum ada hasil psikotes untuk token ini');
+      }
+      
+      verifiedEntity.value = participant;
+      availableResults.value = results;
+      formStatus.value = 'success';
+      
+    } else {
+      // Verify Institution by token
+      const institution = await getInstitutionByToken(token);
+      
+      if (!institution) {
+        throw new Error('Token instansi tidak ditemukan');
+      }
+      
+      // Verify name matches (case-insensitive, partial match)
+      if (!institution.namaInstansi.toLowerCase().includes(name.toLowerCase())) {
+        throw new Error('Nama instansi tidak cocok dengan token');
+      }
+      
+      // Get results for this institution
+      const results = await getResultsByInstitution(institution.id!);
+      
+      verifiedEntity.value = institution;
+      availableResults.value = results;
+      formStatus.value = 'success';
       showFiles.value = true;
     }
-  } else {
+  } catch (error: any) {
+    console.error('Verification error:', error);
     formStatus.value = 'error';
+    errorMessage.value = error.message || 'Token tidak valid atau data tidak ditemukan';
+  }
+};
+
+// Download a result file
+const handleDownload = async (result: PsychotestResult) => {
+  if (!result.id || downloadingIds.value.has(result.id)) return;
+  
+  downloadingIds.value.add(result.id);
+  
+  try {
+    // Get download URL and trigger download
+    const url = await downloadResult(result.id);
+    
+    // Create a temporary link and click it to download
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = result.fileName;
+    link.target = '_blank';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    // Log the download activity
+    await logDownload(
+      result.entityName || result.entityId,
+      result.entityType,
+      result.token,
+      'anonymous', // Guest download
+      result.id,
+      result.fileName
+    );
+  } catch (error: any) {
+    console.error('Download error:', error);
+    alert('Gagal mengunduh file. Silakan coba lagi.');
+  } finally {
+    downloadingIds.value.delete(result.id!);
   }
 };
 
 const handleTypeChange = (value: string) => {
-  userType.value = value as 'cpmi' | 'instansi';
+  userType.value = value as EntityType;
   formStatus.value = 'idle';
+  errorMessage.value = null;
   showFiles.value = false;
+  verifiedEntity.value = null;
+  availableResults.value = [];
   formData.value = { nama: '', token: '', tanggalLahir: '', namaInstansi: '' };
 };
 
 const scrollToDownload = () => {
   document.getElementById('download-section')?.scrollIntoView({ behavior: 'smooth' });
+};
+
+// Format date for display
+const formatDate = (date: any): string => {
+  if (!date) return '-';
+  const d = date.toDate ? date.toDate() : new Date(date);
+  return d.toLocaleDateString('id-ID', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+  });
 };
 </script>
 
@@ -164,82 +284,140 @@ const scrollToDownload = () => {
             <div v-if="userType === 'cpmi'" class="space-y-6">
               <div>
                 <label class="block text-gray-700 font-medium mb-3">Nama Lengkap</label>
-                <Input v-model="formData.nama" placeholder="Masukkan nama lengkap sesuai KTP" class="bg-white border-2 border-gray-300 h-14 px-5 focus:border-[#2563FF]" />
+                <Input 
+                  v-model="formData.nama" 
+                  :disabled="formStatus === 'loading'"
+                  placeholder="Masukkan nama lengkap sesuai KTP" 
+                  class="bg-white border-2 border-gray-300 h-14 px-5 focus:border-[#2563FF] disabled:opacity-50" 
+                />
               </div>
               
               <div>
                 <label class="block text-gray-700 font-medium mb-3">Token Akses</label>
-                <Input v-model="formData.token" placeholder="Masukkan kode token unik Anda" class="bg-white border-2 border-gray-300 h-14 px-5 font-mono focus:border-[#2563FF]" />
+                <Input 
+                  v-model="formData.token" 
+                  :disabled="formStatus === 'loading'"
+                  placeholder="Masukkan kode token unik Anda" 
+                  class="bg-white border-2 border-gray-300 h-14 px-5 font-mono focus:border-[#2563FF] disabled:opacity-50" 
+                />
               </div>
 
               <div>
                 <label class="block text-gray-700 font-medium mb-3">Tanggal Lahir <span class="text-gray-400">(Opsional)</span></label>
-                <Input v-model="formData.tanggalLahir" type="date" class="bg-white border-2 border-gray-300 h-14 px-5 focus:border-[#2563FF]" />
+                <Input 
+                  v-model="formData.tanggalLahir" 
+                  :disabled="formStatus === 'loading'"
+                  type="date" 
+                  class="bg-white border-2 border-gray-300 h-14 px-5 focus:border-[#2563FF] disabled:opacity-50" 
+                />
               </div>
 
-              <Button class="w-full bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-14 text-base font-semibold shadow-lg" @click="handleCheckData">
-                Verifikasi & Cek Data
+              <Button 
+                :disabled="formStatus === 'loading'"
+                class="w-full bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-14 text-base font-semibold shadow-lg disabled:opacity-50" 
+                @click="handleCheckData"
+              >
+                <Loader2 v-if="formStatus === 'loading'" class="w-5 h-5 mr-2 animate-spin" />
+                {{ formStatus === 'loading' ? 'Memverifikasi...' : 'Verifikasi & Cek Data' }}
               </Button>
 
-              <div v-if="formStatus === 'success'" class="mt-6 space-y-4 p-6 bg-green-50 border-2 border-green-200 rounded-2xl">
+              <div v-if="formStatus === 'success' && availableResults.length > 0" class="mt-6 space-y-4 p-6 bg-green-50 border-2 border-green-200 rounded-2xl">
                 <div class="flex items-center gap-3 text-green-700">
                   <CheckCircle class="w-6 h-6" />
                   <span class="font-semibold">Data berhasil ditemukan!</span>
                 </div>
-                <Button class="w-full bg-green-600 hover:bg-green-700 text-white h-14 font-semibold">
-                  <Download class="w-5 h-5 mr-2" />
-                  Download Hasil Psikotes (PDF)
-                </Button>
-              </div>
-            </div>
-
-            <div v-else class="space-y-6">
-              <div>
-                <label class="block text-gray-700 font-medium mb-3">Nama Instansi / Lembaga</label>
-                <Input v-model="formData.namaInstansi" placeholder="Contoh: SMK Negeri 1 Jakarta" class="bg-white border-2 border-gray-300 h-14 px-5 focus:border-[#2563FF]" />
-              </div>
-              
-              <div>
-                <label class="block text-gray-700 font-medium mb-3">Token Akses Instansi</label>
-                <Input v-model="formData.token" placeholder="Masukkan kode token yang diberikan" class="bg-white border-2 border-gray-300 h-14 px-5 font-mono focus:border-[#2563FF]" />
-              </div>
-
-              <Button class="w-full bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-14 text-base font-semibold shadow-lg" @click="handleCheckData">
-                Cari File Tersedia
-              </Button>
-
-              <div v-if="showFiles" class="mt-6 bg-white border-2 border-gray-300 rounded-2xl overflow-hidden">
-                <div class="bg-gradient-to-r from-[#2563FF] to-[#7C3AED] px-6 py-4">
-                  <h3 class="font-semibold text-white">File Tersedia untuk Diunduh</h3>
-                </div>
-                <div class="divide-y divide-gray-200">
-                  <div v-for="(file, idx) in [
-                    { nama: 'Ahmad Fauzi', tanggal: '15 Des 2025' },
-                    { nama: 'Siti Nurhaliza', tanggal: '14 Des 2025' },
-                    { nama: 'Budi Santoso', tanggal: '13 Des 2025' }
-                  ]" :key="idx" class="px-6 py-4 flex items-center justify-between hover:bg-gray-50">
+                <div v-for="result in availableResults" :key="result.id" class="bg-white rounded-lg p-4 border border-green-200">
+                  <div class="flex items-center justify-between">
                     <div>
-                      <div class="font-medium text-gray-900">{{ file.nama }}</div>
-                      <div class="text-sm text-gray-500">Tanggal tes: {{ file.tanggal }}</div>
+                      <div class="font-medium text-gray-900">{{ result.jenisTest }}</div>
+                      <div class="text-sm text-gray-500">Tanggal: {{ formatDate(result.tanggalTest) }}</div>
                     </div>
-                    <Button size="sm" class="bg-[#2563FF] hover:bg-[#1d4ed8] text-white">
-                      <Download class="w-4 h-4 mr-1" />
-                      Download
+                    <Button 
+                      @click="handleDownload(result)"
+                      :disabled="downloadingIds.has(result.id!)"
+                      class="bg-green-600 hover:bg-green-700 text-white disabled:opacity-50"
+                    >
+                      <Loader2 v-if="downloadingIds.has(result.id!)" class="w-4 h-4 mr-1 animate-spin" />
+                      <Download v-else class="w-4 h-4 mr-1" />
+                      {{ downloadingIds.has(result.id!) ? 'Mengunduh...' : 'Download PDF' }}
                     </Button>
                   </div>
                 </div>
               </div>
             </div>
 
-            <div v-if="formStatus === 'error'" class="mt-6 flex items-start gap-3 text-red-700 bg-red-50 p-5 border-2 border-red-200 rounded-xl">
-              <XCircle class="w-6 h-6 mt-0.5 flex-shrink-0" />
+            <div v-else class="space-y-6">
               <div>
-                <div class="font-semibold mb-1">Token Tidak Valid</div>
-                <div class="text-sm">Silakan periksa kembali kode token yang Anda masukkan.</div>
+                <label class="block text-gray-700 font-medium mb-3">Nama Instansi / Lembaga</label>
+                <Input 
+                  v-model="formData.namaInstansi" 
+                  :disabled="formStatus === 'loading'"
+                  placeholder="Contoh: SMK Negeri 1 Jakarta" 
+                  class="bg-white border-2 border-gray-300 h-14 px-5 focus:border-[#2563FF] disabled:opacity-50" 
+                />
+              </div>
+              
+              <div>
+                <label class="block text-gray-700 font-medium mb-3">Token Akses Instansi</label>
+                <Input 
+                  v-model="formData.token" 
+                  :disabled="formStatus === 'loading'"
+                  placeholder="Masukkan kode token yang diberikan" 
+                  class="bg-white border-2 border-gray-300 h-14 px-5 font-mono focus:border-[#2563FF] disabled:opacity-50" 
+                />
+              </div>
+
+              <Button 
+                :disabled="formStatus === 'loading'"
+                class="w-full bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-14 text-base font-semibold shadow-lg disabled:opacity-50" 
+                @click="handleCheckData"
+              >
+                <Loader2 v-if="formStatus === 'loading'" class="w-5 h-5 mr-2 animate-spin" />
+                {{ formStatus === 'loading' ? 'Mencari...' : 'Cari File Tersedia' }}
+              </Button>
+
+              <div v-if="showFiles && availableResults.length > 0" class="mt-6 bg-white border-2 border-gray-300 rounded-2xl overflow-hidden">
+                <div class="bg-gradient-to-r from-[#2563FF] to-[#7C3AED] px-6 py-4">
+                  <h3 class="font-semibold text-white">File Tersedia untuk Diunduh ({{ availableResults.length }} file)</h3>
+                </div>
+                <div class="divide-y divide-gray-200 max-h-96 overflow-y-auto">
+                  <div 
+                    v-for="result in availableResults" 
+                    :key="result.id" 
+                    class="px-6 py-4 flex items-center justify-between hover:bg-gray-50"
+                  >
+                    <div>
+                      <div class="font-medium text-gray-900">{{ result.entityName }}</div>
+                      <div class="text-sm text-gray-500">Tanggal tes: {{ formatDate(result.tanggalTest) }}</div>
+                    </div>
+                    <Button 
+                      size="sm" 
+                      @click="handleDownload(result)"
+                      :disabled="downloadingIds.has(result.id!)"
+                      class="bg-[#2563FF] hover:bg-[#1d4ed8] text-white disabled:opacity-50"
+                    >
+                      <Loader2 v-if="downloadingIds.has(result.id!)" class="w-4 h-4 mr-1 animate-spin" />
+                      <Download v-else class="w-4 h-4 mr-1" />
+                      {{ downloadingIds.has(result.id!) ? '...' : 'Download' }}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              
+              <div v-if="showFiles && availableResults.length === 0" class="mt-6 p-6 bg-gray-50 border-2 border-gray-200 rounded-2xl text-center">
+                <p class="text-gray-600">Belum ada file hasil psikotes untuk instansi ini.</p>
               </div>
             </div>
 
-            <div v-if="formStatus === 'success' && userType === 'instansi'" class="mt-6 flex items-start gap-3 text-green-700 bg-green-50 p-5 border-2 border-green-200 rounded-xl">
+            <div v-if="formStatus === 'error'" class="mt-6 flex items-start gap-3 text-red-700 bg-red-50 p-5 border-2 border-red-200 rounded-xl">
+              <XCircle class="w-6 h-6 mt-0.5 flex-shrink-0" />
+              <div>
+                <div class="font-semibold mb-1">Verifikasi Gagal</div>
+                <div class="text-sm">{{ errorMessage || 'Silakan periksa kembali data yang Anda masukkan.' }}</div>
+              </div>
+            </div>
+
+            <div v-if="formStatus === 'success' && userType === 'instansi' && availableResults.length > 0" class="mt-6 flex items-start gap-3 text-green-700 bg-green-50 p-5 border-2 border-green-200 rounded-xl">
               <CheckCircle class="w-6 h-6 mt-0.5 flex-shrink-0" />
               <span>Berhasil! Silakan pilih file yang ingin diunduh dari daftar di atas.</span>
             </div>

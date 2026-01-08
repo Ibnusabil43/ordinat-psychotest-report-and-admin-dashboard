@@ -20,7 +20,7 @@ const router = createRouter({
       path: '/admin/login',
       name: 'AdminLogin',
       component: () => import('@/views/AdminLogin.vue'),
-      meta: { transition: 'fade' }
+      meta: { transition: 'fade', guestOnly: true }
     },
     {
       path: '/admin/dashboard',
@@ -56,15 +56,22 @@ const router = createRouter({
 })
 
 // Navigation guard for authentication
-router.beforeEach((to, _from, next) => {
+router.beforeEach(async (to, _from, next) => {
   const authStore = useAuthStore()
   
+  // Wait for auth initialization
+  if (!authStore.isInitialized) {
+    await authStore.initializeAuth()
+  }
+  
+  // If route requires authentication
   if (to.meta.requiresAuth) {
     if (!authStore.isLoggedIn) {
-      next({ name: 'EmployeeLogin' })
+      next({ name: 'AdminLogin', query: { redirect: to.fullPath } })
       return
     }
     
+    // Check role-based access
     if (to.meta.role && authStore.userRole !== to.meta.role) {
       // Redirect to appropriate dashboard based on role
       if (authStore.userRole === 'admin') {
@@ -72,10 +79,23 @@ router.beforeEach((to, _from, next) => {
       } else if (authStore.userRole === 'tester') {
         next({ name: 'TesterPortal' })
       } else {
-        next({ name: 'EmployeeLogin' })
+        next({ name: 'AdminLogin' })
       }
       return
     }
+  }
+  
+  // If route is for guests only (e.g., login page) and user is logged in
+  if (to.meta.guestOnly && authStore.isLoggedIn) {
+    // Redirect to appropriate dashboard based on role
+    if (authStore.userRole === 'admin') {
+      next({ name: 'AdminDashboard' })
+    } else if (authStore.userRole === 'tester') {
+      next({ name: 'TesterPortal' })
+    } else {
+      next({ name: 'Home' })
+    }
+    return
   }
   
   next()

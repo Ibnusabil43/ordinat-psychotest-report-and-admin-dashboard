@@ -1,11 +1,25 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useAuthStore } from '@/stores/auth';
 import AdminSidebar from '@/components/AdminSidebar.vue';
 import Button from '@/components/ui/Button.vue';
 import Input from '@/components/ui/Input.vue';
 import Select from '@/components/ui/Select.vue';
-import { RefreshCw } from 'lucide-vue-next';
+import LoadingSpinner from '@/components/ui/LoadingSpinner.vue';
+import { RefreshCw, CheckCircle, AlertCircle } from 'lucide-vue-next';
+import { 
+  createParticipant, 
+  generateParticipantToken, 
+  getRecentParticipants 
+} from '@/services/participantService';
+import { 
+  createInstitution, 
+  generateInstitutionToken, 
+  getRecentInstitutions 
+} from '@/services/institutionService';
+import { logRegistration } from '@/services/activityService';
+import type { Participant, Institution } from '@/types/models';
+import { Timestamp } from 'firebase/firestore';
 
 const authStore = useAuthStore();
 
@@ -16,38 +30,164 @@ const formData = ref({
   pendidikan: '',
   nik: '',
   namaInstansi: '',
-  token: 'CPM-2026-' + Math.random().toString(36).substr(2, 6).toUpperCase()
+  token: ''
 });
 
+// Loading states
+const isSubmitting = ref(false);
+const isLoadingRecent = ref(true);
+const submitSuccess = ref(false);
+const submitError = ref<string | null>(null);
+
+// Recent registrations
+const recentRegistrations = ref<Array<{
+  nama: string;
+  tipe: string;
+  token: string;
+  tanggal: string;
+}>>([]);
+
+// Format timestamp to readable date
+function formatDate(timestamp: Timestamp | Date | undefined): string {
+  if (!timestamp) return '-';
+  const date = timestamp instanceof Timestamp ? timestamp.toDate() : timestamp;
+  return date.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  });
+}
+
+// Generate token based on type
 const generateToken = () => {
-  const prefix = registrationType.value === 'cpmi' ? 'CPM' : 'INS';
-  formData.value.token = `${prefix}-2026-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+  formData.value.token = registrationType.value === 'cpmi' 
+    ? generateParticipantToken() 
+    : generateInstitutionToken();
 };
 
-const handleSubmit = () => {
-  alert(`Data ${registrationType.value === 'cpmi' ? 'peserta' : 'instansi'} berhasil disimpan!`);
-};
-
-const handleTypeChange = (value: string) => {
-  registrationType.value = value as 'cpmi' | 'instansi';
+// Initialize token on mount
+onMounted(async () => {
   generateToken();
+  await loadRecentRegistrations();
+});
+
+// Load recent registrations
+async function loadRecentRegistrations() {
+  isLoadingRecent.value = true;
+  
+  try {
+    const [participants, institutions] = await Promise.all([
+      getRecentParticipants(3),
+      getRecentInstitutions(2)
+    ]);
+    
+    const combined = [
+      ...participants.map((p: Participant) => ({
+        nama: p.namaLengkap,
+        tipe: 'CPMI',
+        token: p.token,
+        tanggal: formatDate(p.createdAt)
+      })),
+      ...institutions.map((i: Institution) => ({
+        nama: i.namaInstansi,
+        tipe: 'Instansi',
+        token: i.token,
+        tanggal: formatDate(i.createdAt)
+      }))
+    ];
+    
+    // Sort by date (most recent first) and take first 5
+    recentRegistrations.value = combined.slice(0, 5);
+  } catch (error) {
+    console.error('Error loading recent registrations:', error);
+  } finally {
+    isLoadingRecent.value = false;
+  }
+}
+
+// Handle form submission
+const handleSubmit = async () => {
+  isSubmitting.value = true;
+  submitSuccess.value = false;
+  submitError.value = null;
+  
+  try {
+    const userId = authStore.userId || 'unknown';
+    
+    if (registrationType.value === 'cpmi') {
+      // Create participant
+      const participant = await createParticipant({
+        namaLengkap: formData.value.namaLengkap,
+        tempatTanggalLahir: formData.value.tempatTanggalLahir,
+        pendidikan: formData.value.pendidikan,
+        nik: formData.value.nik,
+        token: formData.value.token
+      }, userId);
+      
+      // Log activity
+      await logRegistration(
+        participant.namaLengkap,
+        'cpmi',
+        participant.token,
+        userId,
+        participant.id
+      );
+    } else {
+      // Create institution
+      const institution = await createInstitution({
+        namaInstansi: formData.value.namaInstansi,
+        token: formData.value.token
+      }, userId);
+      
+      // Log activity
+      await logRegistration(
+        institution.namaInstansi,
+        'instansi',
+        institution.token,
+        userId,
+        institution.id
+      );
+    }
+    
+    submitSuccess.value = true;
+    
+    // Reset form
+    resetForm();
+    
+    // Reload recent registrations
+    await loadRecentRegistrations();
+    
+    // Hide success message after 3 seconds
+    setTimeout(() => {
+      submitSuccess.value = false;
+    }, 3000);
+    
+  } catch (error: any) {
+    console.error('Error creating registration:', error);
+    submitError.value = error.message || 'Gagal menyimpan data. Silakan coba lagi.';
+  } finally {
+    isSubmitting.value = false;
+  }
+};
+
+// Reset form fields
+function resetForm() {
   formData.value = {
     namaLengkap: '',
     tempatTanggalLahir: '',
     pendidikan: '',
     nik: '',
     namaInstansi: '',
-    token: formData.value.token
+    token: ''
   };
-};
+  generateToken();
+}
 
-const recentRegistrations = [
-  { nama: 'Ahmad Fauzi', tipe: 'CPMI', token: 'CPM-2026-A1B2C3', tanggal: '07 Jan 2026' },
-  { nama: 'SMK Negeri 1 Jakarta', tipe: 'Instansi', token: 'INS-2026-D4E5F6', tanggal: '07 Jan 2026' },
-  { nama: 'Siti Nurhaliza', tipe: 'CPMI', token: 'CPM-2026-G7H8I9', tanggal: '06 Jan 2026' },
-  { nama: 'PT Maju Jaya', tipe: 'Instansi', token: 'INS-2026-J1K2L3', tanggal: '06 Jan 2026' },
-  { nama: 'Budi Santoso', tipe: 'CPMI', token: 'CPM-2026-M4N5O6', tanggal: '05 Jan 2026' },
-];
+// Handle type change
+const handleTypeChange = (value: string) => {
+  registrationType.value = value as 'cpmi' | 'instansi';
+  resetForm();
+};
 </script>
 
 <template>
@@ -74,6 +214,17 @@ const recentRegistrations = [
 
       <!-- Main Content -->
       <div class="p-4 md:p-8 max-w-6xl">
+        <!-- Success/Error Messages -->
+        <div v-if="submitSuccess" class="mb-6 p-4 bg-green-50 border border-green-200 rounded-xl flex items-center gap-3">
+          <CheckCircle class="w-5 h-5 text-green-500 flex-shrink-0" />
+          <span class="text-sm text-green-700">Data berhasil disimpan!</span>
+        </div>
+        
+        <div v-if="submitError" class="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-center gap-3">
+          <AlertCircle class="w-5 h-5 text-red-500 flex-shrink-0" />
+          <span class="text-sm text-red-700">{{ submitError }}</span>
+        </div>
+        
         <!-- Registration Form Card -->
         <div class="bg-white border-2 border-gray-200 rounded-xl p-4 md:p-8 mb-6 md:mb-8">
           <form @submit.prevent="handleSubmit">
@@ -83,6 +234,7 @@ const recentRegistrations = [
               <Select
                 v-model="registrationType"
                 @update:model-value="handleTypeChange"
+                :disabled="isSubmitting"
                 class="w-full bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 rounded-md hover:border-[#2563FF] transition-colors text-sm md:text-base"
               >
                 <option value="cpmi">CPMI (Calon Pekerja Migran Indonesia)</option>
@@ -99,6 +251,7 @@ const recentRegistrations = [
                     v-model="formData.namaLengkap"
                     placeholder="Masukkan nama lengkap"
                     class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
+                    :disabled="isSubmitting"
                     required
                   />
                 </div>
@@ -109,6 +262,7 @@ const recentRegistrations = [
                     v-model="formData.tempatTanggalLahir"
                     placeholder="Jakarta, 15 Januari 1990"
                     class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
+                    :disabled="isSubmitting"
                     required
                   />
                 </div>
@@ -121,6 +275,7 @@ const recentRegistrations = [
                     v-model="formData.pendidikan"
                     placeholder="SMA / SMK / D3 / S1"
                     class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
+                    :disabled="isSubmitting"
                     required
                   />
                 </div>
@@ -131,6 +286,7 @@ const recentRegistrations = [
                     v-model="formData.nik"
                     placeholder="Masukkan NIK atau nomor paspor"
                     class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
+                    :disabled="isSubmitting"
                     required
                   />
                 </div>
@@ -157,9 +313,11 @@ const recentRegistrations = [
 
               <Button 
                 type="submit"
-                class="w-full bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-11 md:h-12 font-semibold text-sm md:text-base min-h-[44px] md:min-h-0"
+                :disabled="isSubmitting"
+                class="w-full bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-11 md:h-12 font-semibold text-sm md:text-base min-h-[44px] md:min-h-0 disabled:opacity-50"
               >
-                Simpan Data Peserta
+                <LoadingSpinner v-if="isSubmitting" class="w-5 h-5 mr-2" />
+                {{ isSubmitting ? 'Menyimpan...' : 'Simpan Data Peserta' }}
               </Button>
             </div>
 
@@ -171,6 +329,7 @@ const recentRegistrations = [
                   v-model="formData.namaInstansi"
                   placeholder="Masukkan nama instansi"
                   class="bg-gray-50 border-2 border-gray-300 h-11 md:h-12 px-4 focus:border-[#2563FF] text-sm md:text-base"
+                  :disabled="isSubmitting"
                   required
                 />
               </div>
@@ -186,6 +345,7 @@ const recentRegistrations = [
                   <Button
                     type="button"
                     @click="generateToken"
+                    :disabled="isSubmitting"
                     class="bg-purple-600 hover:bg-purple-700 text-white px-4 md:px-6 min-h-[44px] md:min-h-0 text-sm md:text-base"
                   >
                     <RefreshCw class="w-4 h-4 md:mr-2" />
@@ -196,9 +356,11 @@ const recentRegistrations = [
 
               <Button 
                 type="submit"
-                class="w-full bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-11 md:h-12 font-semibold text-sm md:text-base min-h-[44px] md:min-h-0"
+                :disabled="isSubmitting"
+                class="w-full bg-gradient-to-r from-[#2563FF] to-[#7C3AED] hover:from-[#1d4ed8] hover:to-[#6d28d9] text-white h-11 md:h-12 font-semibold text-sm md:text-base min-h-[44px] md:min-h-0 disabled:opacity-50"
               >
-                Simpan Data Instansi
+                <LoadingSpinner v-if="isSubmitting" class="w-5 h-5 mr-2" />
+                {{ isSubmitting ? 'Menyimpan...' : 'Simpan Data Instansi' }}
               </Button>
             </div>
           </form>

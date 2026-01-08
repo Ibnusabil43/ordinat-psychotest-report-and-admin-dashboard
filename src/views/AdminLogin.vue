@@ -1,29 +1,54 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
-import { ArrowLeft, ShieldCheck } from 'lucide-vue-next'
+import LoadingSpinner from '@/components/ui/LoadingSpinner.vue'
+import { ArrowLeft, ShieldCheck, AlertCircle } from 'lucide-vue-next'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 
 const email = ref('')
 const password = ref('')
-const selectedRole = ref<'admin' | 'tester'>('admin')
+const localError = ref<string | null>(null)
 
-const handleLogin = (e: Event) => {
+// Computed property to show combined error
+const errorMessage = computed(() => localError.value || authStore.error)
+
+const handleLogin = async (e: Event) => {
   e.preventDefault()
+  localError.value = null
   
-  // Mock login - in production, this would call an API
-  authStore.login(selectedRole.value, email.value)
+  // Basic validation
+  if (!email.value.trim()) {
+    localError.value = 'Email tidak boleh kosong'
+    return
+  }
   
-  // Navigate to appropriate dashboard
-  if (selectedRole.value === 'admin') {
-    router.push({ name: 'AdminDashboard' })
-  } else {
-    router.push({ name: 'TesterPortal' })
+  if (!password.value) {
+    localError.value = 'Password tidak boleh kosong'
+    return
+  }
+  
+  // Call Firebase login
+  const result = await authStore.login(email.value, password.value)
+  
+  if (result.success) {
+    // Get redirect URL or default based on role
+    const redirectUrl = route.query.redirect as string
+    
+    if (redirectUrl) {
+      router.push(redirectUrl)
+    } else if (result.role === 'admin') {
+      router.push({ name: 'AdminDashboard' })
+    } else if (result.role === 'tester') {
+      router.push({ name: 'TesterPortal' })
+    } else {
+      router.push({ name: 'Home' })
+    }
   }
 }
 
@@ -63,6 +88,12 @@ const goBack = () => {
         </div>
       </div>
 
+      <!-- Error Alert -->
+      <div v-if="errorMessage" class="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3">
+        <AlertCircle class="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+        <div class="text-sm text-red-700">{{ errorMessage }}</div>
+      </div>
+
       <!-- Login Form -->
       <form @submit="handleLogin" class="space-y-6">
         <div>
@@ -72,6 +103,7 @@ const goBack = () => {
             type="email"
             placeholder="admin@ordinat.com"
             class="bg-gray-50 border-2 border-gray-200 h-12 px-4 focus:border-[#2563FF]"
+            :disabled="authStore.isLoading"
             required
           />
         </div>
@@ -83,79 +115,26 @@ const goBack = () => {
             type="password"
             placeholder="Masukkan password"
             class="bg-gray-50 border-2 border-gray-200 h-12 px-4 focus:border-[#2563FF]"
+            :disabled="authStore.isLoading"
             required
           />
         </div>
 
-        <!-- Role Selection -->
-        <div>
-          <label class="block text-gray-700 font-medium mb-3">Role Karyawan</label>
-          <div class="space-y-3">
-            <!-- Admin Role -->
-            <button
-              type="button"
-              @click="selectedRole = 'admin'"
-              :class="[
-                'w-full text-left p-4 rounded-xl border-2 transition-all',
-                selectedRole === 'admin'
-                  ? 'border-[#2563FF] bg-blue-50'
-                  : 'border-gray-200 bg-white hover:border-gray-300'
-              ]"
-            >
-              <div class="flex items-start gap-3">
-                <div :class="[
-                  'w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center flex-shrink-0',
-                  selectedRole === 'admin' 
-                    ? 'border-[#2563FF] bg-[#2563FF]' 
-                    : 'border-gray-300'
-                ]">
-                  <div v-if="selectedRole === 'admin'" class="w-2 h-2 bg-white rounded-full"></div>
-                </div>
-                <div>
-                  <div class="font-semibold text-gray-900 mb-1">Admin</div>
-                  <div class="text-sm text-gray-600">
-                    Kelola registrasi peserta dan upload hasil psikotes
-                  </div>
-                </div>
-              </div>
-            </button>
-
-            <!-- Tester Role -->
-            <button
-              type="button"
-              @click="selectedRole = 'tester'"
-              :class="[
-                'w-full text-left p-4 rounded-xl border-2 transition-all',
-                selectedRole === 'tester'
-                  ? 'border-[#7C3AED] bg-purple-50'
-                  : 'border-gray-200 bg-white hover:border-gray-300'
-              ]"
-            >
-              <div class="flex items-start gap-3">
-                <div :class="[
-                  'w-5 h-5 rounded-full border-2 mt-0.5 flex items-center justify-center flex-shrink-0',
-                  selectedRole === 'tester' 
-                    ? 'border-[#7C3AED] bg-[#7C3AED]' 
-                    : 'border-gray-300'
-                ]">
-                  <div v-if="selectedRole === 'tester'" class="w-2 h-2 bg-white rounded-full"></div>
-                </div>
-                <div>
-                  <div class="font-semibold text-gray-900 mb-1">Tester</div>
-                  <div class="text-sm text-gray-600">
-                    Verifikasi data peserta saat sesi psikotes di sekolah
-                  </div>
-                </div>
-              </div>
-            </button>
-          </div>
+        <!-- Role Info -->
+        <div class="p-4 bg-gray-50 rounded-xl border border-gray-200">
+          <p class="text-sm text-gray-600">
+            <strong>Info:</strong> Role akses (Admin/Tester) akan ditentukan secara otomatis berdasarkan akun yang terdaftar.
+          </p>
         </div>
 
         <Button 
           type="submit"
-          class="w-full bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white h-12 font-semibold shadow-lg"
+          :disabled="authStore.isLoading"
+          class="w-full bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white h-12 font-semibold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Login sebagai {{ selectedRole === 'admin' ? 'Admin' : 'Tester' }}
+          <LoadingSpinner v-if="authStore.isLoading" class="w-5 h-5 mr-2" />
+          <span v-if="authStore.isLoading">Memproses...</span>
+          <span v-else>Login</span>
         </Button>
 
         <p class="text-xs text-gray-500 text-center pt-2">
