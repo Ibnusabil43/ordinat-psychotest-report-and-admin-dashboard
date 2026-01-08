@@ -9,7 +9,6 @@ import {
   deleteDoc,
   query,
   where,
-  orderBy,
   limit,
   serverTimestamp,
   Timestamp,
@@ -103,11 +102,10 @@ export async function searchParticipants(
   const db = getFirebaseFirestore()
   const searchLower = searchQuery.toLowerCase()
 
-  // Get all participants and filter client-side
+  // Get all participants and filter client-side (no orderBy to avoid index requirement)
   // Note: For production, consider using Algolia or similar for full-text search
   const q = query(
     collection(db, COLLECTION_NAME),
-    orderBy('createdAt', 'desc'),
     limit(100)
   )
   const querySnapshot = await getDocs(q)
@@ -126,6 +124,13 @@ export async function searchParticipants(
     }
   })
 
+  // Sort by createdAt client-side
+  results.sort((a, b) => {
+    const aTime = a.createdAt?.toMillis() || 0
+    const bTime = b.createdAt?.toMillis() || 0
+    return bTime - aTime
+  })
+
   return results.slice(0, maxResults)
 }
 
@@ -136,8 +141,7 @@ export async function getRecentParticipants(count: number = 5): Promise<Particip
   const db = getFirebaseFirestore()
   const q = query(
     collection(db, COLLECTION_NAME),
-    orderBy('createdAt', 'desc'),
-    limit(count)
+    limit(50)
   )
   const querySnapshot = await getDocs(q)
 
@@ -146,7 +150,14 @@ export async function getRecentParticipants(count: number = 5): Promise<Particip
     participants.push({ id: docSnap.id, ...docSnap.data() } as Participant)
   })
 
-  return participants
+  // Sort client-side
+  participants.sort((a, b) => {
+    const aTime = a.createdAt?.toMillis() || 0
+    const bTime = b.createdAt?.toMillis() || 0
+    return bTime - aTime
+  })
+
+  return participants.slice(0, count)
 }
 
 /**
@@ -155,8 +166,7 @@ export async function getRecentParticipants(count: number = 5): Promise<Particip
 export async function getAllParticipants(): Promise<Participant[]> {
   const db = getFirebaseFirestore()
   const q = query(
-    collection(db, COLLECTION_NAME),
-    orderBy('createdAt', 'desc')
+    collection(db, COLLECTION_NAME)
   )
   const querySnapshot = await getDocs(q)
 

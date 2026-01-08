@@ -9,7 +9,6 @@ import {
   deleteDoc,
   query,
   where,
-  orderBy,
   limit,
   serverTimestamp,
   Timestamp,
@@ -96,10 +95,9 @@ export async function searchInstitutions(
   const db = getFirebaseFirestore()
   const searchLower = searchQuery.toLowerCase()
 
-  // Get all institutions and filter client-side
+  // Get all institutions and filter client-side (no orderBy to avoid index requirement)
   const q = query(
     collection(db, COLLECTION_NAME),
-    orderBy('createdAt', 'desc'),
     limit(100)
   )
   const querySnapshot = await getDocs(q)
@@ -117,6 +115,13 @@ export async function searchInstitutions(
     }
   })
 
+  // Sort by createdAt client-side
+  results.sort((a, b) => {
+    const aTime = a.createdAt?.toMillis() || 0
+    const bTime = b.createdAt?.toMillis() || 0
+    return bTime - aTime
+  })
+
   return results.slice(0, maxResults)
 }
 
@@ -127,8 +132,7 @@ export async function getRecentInstitutions(count: number = 5): Promise<Institut
   const db = getFirebaseFirestore()
   const q = query(
     collection(db, COLLECTION_NAME),
-    orderBy('createdAt', 'desc'),
-    limit(count)
+    limit(50)
   )
   const querySnapshot = await getDocs(q)
 
@@ -137,7 +141,14 @@ export async function getRecentInstitutions(count: number = 5): Promise<Institut
     institutions.push({ id: docSnap.id, ...docSnap.data() } as Institution)
   })
 
-  return institutions
+  // Sort client-side
+  institutions.sort((a, b) => {
+    const aTime = a.createdAt?.toMillis() || 0
+    const bTime = b.createdAt?.toMillis() || 0
+    return bTime - aTime
+  })
+
+  return institutions.slice(0, count)
 }
 
 /**
@@ -146,8 +157,7 @@ export async function getRecentInstitutions(count: number = 5): Promise<Institut
 export async function getAllInstitutions(): Promise<Institution[]> {
   const db = getFirebaseFirestore()
   const q = query(
-    collection(db, COLLECTION_NAME),
-    orderBy('createdAt', 'desc')
+    collection(db, COLLECTION_NAME)
   )
   const querySnapshot = await getDocs(q)
 

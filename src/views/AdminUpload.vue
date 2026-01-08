@@ -6,12 +6,12 @@ import Button from '@/components/ui/Button.vue';
 import Input from '@/components/ui/Input.vue';
 import Select from '@/components/ui/Select.vue';
 import LoadingSpinner from '@/components/ui/LoadingSpinner.vue';
-import { Upload as UploadIcon, Search, FileText, X, CheckCircle, XCircle } from 'lucide-vue-next';
+import { Upload as UploadIcon, Search, FileText, X, CheckCircle, XCircle, AlertTriangle } from 'lucide-vue-next';
 import { searchParticipants, getParticipantByToken } from '@/services/participantService';
 import { searchInstitutions, getInstitutionByToken } from '@/services/institutionService';
-import { uploadPsychotestResult, type UploadProgress } from '@/services/resultsService';
+import { uploadPsychotestResult, getResultsByEntity, deletePsychotestResult, type UploadProgress } from '@/services/resultsService';
 import { logUpload } from '@/services/activityService';
-import type { Participant, Institution, EntityType } from '@/types/models';
+import type { Participant, Institution, EntityType, PsychotestResult } from '@/types/models';
 
 const authStore = useAuthStore();
 
@@ -24,13 +24,16 @@ const selectedParticipant = ref<{
   jenisTest: string;
   tanggalTest: string;
   type: EntityType;
+  hasExistingResult?: boolean;
+  existingResult?: PsychotestResult;
 } | null>(null);
 const uploadedFile = ref<File | null>(null);
 const uploadStatus = ref<'idle' | 'uploading' | 'success' | 'error'>('idle');
 const uploadProgress = ref(0);
 const errorMessage = ref<string | null>(null);
 const isSearching = ref(false);
-const searchResults = ref<Array<{ id: string; nama: string; token: string }>>([]);
+const searchResults = ref<Array<{ id: string; nama: string; token: string }>>([]); 
+const isCheckingExisting = ref(false);
 
 // Search for participants or institutions
 const handleSearch = async () => {
@@ -43,19 +46,33 @@ const handleSearch = async () => {
   
   try {
     if (category.value === 'cpmi') {
-      // First try to find by token
+      // First try to find by token (exact match)
       const byToken = await getParticipantByToken(searchQuery.value.trim());
       if (byToken) {
-        selectEntity(byToken, 'cpmi');
+        // Show in list first, let user click to select
+        searchResults.value = [{
+          id: byToken.id || '',
+          nama: byToken.namaLengkap,
+          token: byToken.token
+        }];
         return;
       }
       
       // Search by name/NIK
-      const results = await searchParticipants(searchQuery.value.trim(), 5);
-      if (results.length === 1 && results[0]) {
-        selectEntity(results[0], 'cpmi');
-      } else if (results.length > 1) {
-        searchResults.value = results.map(p => ({
+      const results = await searchParticipants(searchQuery.value.trim(), 10);
+      
+      // Deduplicate by token
+      const uniqueByToken = new Map<string, Participant>();
+      results.forEach(p => {
+        if (!uniqueByToken.has(p.token)) {
+          uniqueByToken.set(p.token, p);
+        }
+      });
+      const uniqueResults = Array.from(uniqueByToken.values());
+      
+      if (uniqueResults.length >= 1) {
+        // Always show list, let user click to select
+        searchResults.value = uniqueResults.map(p => ({
           id: p.id || '',
           nama: p.namaLengkap,
           token: p.token
@@ -64,19 +81,33 @@ const handleSearch = async () => {
         errorMessage.value = 'Peserta tidak ditemukan';
       }
     } else {
-      // First try to find by token
+      // First try to find by token (exact match)
       const byToken = await getInstitutionByToken(searchQuery.value.trim());
       if (byToken) {
-        selectEntity(byToken, 'instansi');
+        // Show in list first, let user click to select
+        searchResults.value = [{
+          id: byToken.id || '',
+          nama: byToken.namaInstansi,
+          token: byToken.token
+        }];
         return;
       }
       
       // Search by name
-      const results = await searchInstitutions(searchQuery.value.trim(), 5);
-      if (results.length === 1 && results[0]) {
-        selectEntity(results[0], 'instansi');
-      } else if (results.length > 1) {
-        searchResults.value = results.map(i => ({
+      const results = await searchInstitutions(searchQuery.value.trim(), 10);
+      
+      // Deduplicate by token
+      const uniqueByToken = new Map<string, Institution>();
+      results.forEach(i => {
+        if (!uniqueByToken.has(i.token)) {
+          uniqueByToken.set(i.token, i);
+        }
+      });
+      const uniqueResults = Array.from(uniqueByToken.values());
+      
+      if (uniqueResults.length >= 1) {
+        // Always show list, let user click to select
+        searchResults.value = uniqueResults.map(i => ({
           id: i.id || '',
           nama: i.namaInstansi,
           token: i.token
@@ -94,10 +125,26 @@ const handleSearch = async () => {
 };
 
 // Select an entity from search results
-const selectEntity = (entity: Participant | Institution, type: EntityType) => {
+const selectEntity = async (entity: Participant | Institution, type: EntityType) => {
   const nama = type === 'cpmi' 
     ? (entity as Participant).namaLengkap 
     : (entity as Institution).namaInstansi;
+  
+  isCheckingExisting.value = true;
+  
+  // Check if result already exists for this entity
+  let hasExistingResult = false;
+  let existingResult: PsychotestResult | undefined;
+  
+  try {
+    const existingResults = await getResultsByEntity(type, entity.id || '');
+    if (existingResults.length > 0) {
+      hasExistingResult = true;
+      existingResult = existingResults[0];
+    }
+  } catch (error) {
+    console.error('Error checking existing results:', error);
+  }
   
   selectedParticipant.value = {
     id: entity.id || '',
@@ -109,9 +156,12 @@ const selectEntity = (entity: Participant | Institution, type: EntityType) => {
       month: 'long',
       year: 'numeric'
     }),
-    type
+    type,
+    hasExistingResult,
+    existingResult
   };
   searchResults.value = [];
+  isCheckingExisting.value = false;
 };
 
 // Handle file selection
@@ -150,6 +200,17 @@ const handleUpload = async () => {
   
   try {
     const userId = authStore.userId || 'unknown';
+    
+    // Delete existing file if present (overwrite)
+    if (selectedParticipant.value.hasExistingResult && selectedParticipant.value.existingResult?.id) {
+      try {
+        await deletePsychotestResult(selectedParticipant.value.existingResult.id);
+        console.log('Old file deleted successfully');
+      } catch (deleteError) {
+        console.warn('Failed to delete old file:', deleteError);
+        // Continue with upload even if deletion fails
+      }
+    }
     
     // Upload to Firebase Storage and create Firestore document
     const result = await uploadPsychotestResult(
@@ -212,10 +273,10 @@ const handleSelectSearchResult = async (token: string, type: EntityType) => {
   try {
     if (type === 'cpmi') {
       const p = await getParticipantByToken(token);
-      if (p) selectEntity(p, 'cpmi');
+      if (p) await selectEntity(p, 'cpmi');
     } else {
       const i = await getInstitutionByToken(token);
-      if (i) selectEntity(i, 'instansi');
+      if (i) await selectEntity(i, 'instansi');
     }
   } catch (error) {
     console.error('Error selecting result:', error);
@@ -312,7 +373,7 @@ const handleSelectSearchResult = async (token: string, type: EntityType) => {
             </div>
           </div>
 
-          <!-- Selected Participant Summary -->          <!-- Selected Participant Summary -->
+          <!-- Selected Participant Summary -->
           <div v-if="selectedParticipant" class="mb-4 md:mb-6 p-4 md:p-6 bg-blue-50 border-2 border-blue-200 rounded-xl">
             <h3 class="font-semibold text-gray-900 mb-3 md:mb-4 text-sm md:text-base">Data Terpilih</h3>
             <div class="grid sm:grid-cols-2 gap-3 md:gap-4">
@@ -333,6 +394,21 @@ const handleSelectSearchResult = async (token: string, type: EntityType) => {
               <div>
                 <div class="text-xs md:text-sm text-gray-600 mb-1">Tanggal Tes</div>
                 <div class="font-medium text-gray-900 text-sm md:text-base">{{ selectedParticipant.tanggalTest }}</div>
+              </div>
+            </div>
+            
+            <!-- Existing Result Warning -->
+            <div v-if="selectedParticipant.hasExistingResult" class="mt-4 p-3 bg-amber-50 border border-amber-300 rounded-lg flex items-start gap-3">
+              <AlertTriangle class="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+              <div>
+                <div class="font-medium text-amber-800 text-sm">⚠️ File sudah pernah diupload</div>
+                <div class="text-xs text-amber-700 mt-1">
+                  File: {{ selectedParticipant.existingResult?.fileName || 'Unknown' }}<br>
+                  Diupload: {{ selectedParticipant.existingResult?.uploadedAt?.toDate().toLocaleDateString('id-ID', { day: '2-digit', month: 'long', year: 'numeric' }) || '-' }}
+                </div>
+                <div class="text-xs text-red-600 mt-2 font-medium">
+                  ⚠️ Jika Anda mengupload file baru, file lama akan DIHAPUS dan diganti.
+                </div>
               </div>
             </div>
           </div>

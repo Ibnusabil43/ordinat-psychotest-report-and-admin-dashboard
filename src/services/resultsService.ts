@@ -151,17 +151,24 @@ export async function getResultsByEntity(
   entityId: string
 ): Promise<PsychotestResult[]> {
   const db = getFirebaseFirestore()
+  // Simple query without orderBy to avoid index requirement
   const q = query(
     collection(db, COLLECTION_NAME),
     where('entityType', '==', entityType),
-    where('entityId', '==', entityId),
-    orderBy('uploadedAt', 'desc')
+    where('entityId', '==', entityId)
   )
   const querySnapshot = await getDocs(q)
 
   const results: PsychotestResult[] = []
   querySnapshot.forEach((docSnap) => {
     results.push({ id: docSnap.id, ...docSnap.data() } as PsychotestResult)
+  })
+
+  // Sort client-side
+  results.sort((a, b) => {
+    const aTime = a.uploadedAt?.toMillis() || 0
+    const bTime = b.uploadedAt?.toMillis() || 0
+    return bTime - aTime
   })
 
   return results
@@ -172,10 +179,10 @@ export async function getResultsByEntity(
  */
 export async function getResultsByToken(token: string): Promise<PsychotestResult[]> {
   const db = getFirebaseFirestore()
+  // Simple query without orderBy to avoid index requirement
   const q = query(
     collection(db, COLLECTION_NAME),
-    where('token', '==', token),
-    orderBy('uploadedAt', 'desc')
+    where('token', '==', token)
   )
   const querySnapshot = await getDocs(q)
 
